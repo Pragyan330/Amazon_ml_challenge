@@ -1,0 +1,24 @@
+# ---- challenge data (2.5 GB, never commit) ----
+*.zip
+student_resource/dataset/
+student_resource/.DS_Store
+__MACOSX/
+
+# ---- generated artefacts ----
+output/*.tsv
+artifacts/*
+!artifacts/.gitkeep
+*.pkl
+*.npy
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---- os / editor ----
+.DS_Store
+Thumbs.db

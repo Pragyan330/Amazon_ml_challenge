@@ -1,0 +1,14 @@
+# Stage 1 (rule-based baseline) runs on the Python standard library alone.
+# Pinned versions are what this was developed and measured against.
+#
+# Nothing here reaches the network at runtime. The challenge forbids external databases,
+# APIs and geocoding services for entity resolution, so the pipeline only ever reads the
+# provided TSVs.
+
+# --- stage 1: rule-based baseline ---
+# (no third-party dependencies)
+
+# --- stage 2 onwards, not yet used ---
+# numpy==2.5.2
+# lightgbm==4.6.0        # MIT
+# scikit-learn==1.7.2    # BSD-3, for probability calibration only
