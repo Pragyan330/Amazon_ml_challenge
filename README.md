@@ -14,10 +14,12 @@ Built in stages, simplest first, measuring at each step.
 
 | Stage | Status | Validation macro F_0.5 |
 |---|---|---|
-| 1. Rule-based blocking + scoring | **current** | see `docs/results.md` |
+| 1. Rule-based blocking + scoring | done | **0.7672** |
 | 2. Gradient-boosted matcher | not started | — |
 | 3. Collective S2<->S3 pass + expected-F_0.5 set selection | not started | — |
 | 4. Multilingual encoder for the transliterated tail | not started | — |
+
+Measured results and error analysis: [`docs/results.md`](docs/results.md).
 
 Reference points for reading any score: an all-empty submission scores **0.056**, finding
 every true match but adding one false positive per entity scores **0.752**, and missing one
