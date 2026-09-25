@@ -26,8 +26,9 @@ from ber.pipeline import as_id_map, run_shard
 from ber.scorer import Weights
 from ber.select import sweep_threshold
 
-DATA = os.path.join(os.path.dirname(__file__), "..", "student_resource", "dataset", "train")
-CACHE = os.path.join(os.path.dirname(__file__), "..", "artifacts")
+from ber.config import ARTIFACTS as CACHE, TRAIN as DATA, ensure_dirs
+
+ensure_dirs()
 
 
 def log(msg):

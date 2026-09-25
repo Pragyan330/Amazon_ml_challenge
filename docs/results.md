@@ -106,3 +106,79 @@ Fine sweep, computed from cached scores (`artifacts/val_scored.pkl`):
 Capping matches per entity does not help once the threshold is tuned (max_k=8 and no cap both
 give 0.7672; max_k=3 gives 0.7566), which is expected — a cap is a crude stand-in for the
 rising marginal bar that proper set selection provides directly.
+
+---
+
+# Stage 1b - stripped pipeline, Jaccard family, channel confidence
+
+**Validation macro F_0.5 = 0.7981** (was 0.7672), threshold 0.725.
+
+| | stage 1 | stage 1b |
+|---|---|---|
+| macro F_0.5 | 0.7672 | **0.7981** |
+| best threshold | 0.900 (knife edge) | **0.725 (flat top 0.705-0.735)** |
+| micro precision / recall | 0.9639 / 0.5909 | 0.9011 / 0.6876 |
+| candidates kept per entity | 30.1 | 18.6 |
+| candidate pos:neg ratio | 1 : 354 | **1 : 4.7** |
+| candidate pair recall | 94.43% | 93.31% |
+| oracle over candidates | 0.9803 | 0.9756 |
+| singletons kept empty | 90.61% | 68.80% |
+| US / India | 0.7902 / 0.7329 | 0.8262 / 0.7555 |
+| runtime (US + India) | 1,728s | **909s** |
+
+The score gain matters less than the shape change. Stage 1's optimum sat exactly on a
+discontinuity, earning its score by excluding a 131,231-negative spike at 0.8956 by a
+margin of 0.0044. Stage 1b has no such spike above the threshold - the largest is 57,552
+at 0.450, far below it - and the optimum is flat across 0.705-0.735, so it should survive
+the 23% density shift into the test set far better.
+
+## What changed
+
+**1. Normalisation happened twice per record.** `Blocker.keys()` and `prepare()` both ran
+`fold()`, `name_core()` and `addr_tokens()` independently. A single `Rec` (see
+`src/ber/record.py`) is now built once and serves both blocking and scoring, with character
+n-grams built lazily since only pairs surviving the cheap gate need them.
+
+**2. A cheap gate before the expensive features.** Plain token Jaccard on name and address
+is computed from sets that already exist; if neither reaches 0.10 the pair is dropped before
+any n-gram is built. Measured on 191,388 true pairs, that gate loses 0.021% of them.
+
+**3. `max()` over views replaced by a weighted combination.** Taking the best of several
+views let negatives claim credit from whichever view was most generous, which is what
+degraded separation so badly (negatives at mean 0.512, p90 0.806).
+
+**4. Channel-specific confidence** replaces the single symmetric `missing_penalty`, indexed
+by which evidence channels actually carried signal. A perfect name match with no address now
+scores 0.45 rather than 0.8956 - priced as the 13:1 false-merge risk it was measured to be.
+
+**5. IDF-weighted (generalised) Jaccard** as the primary token measure:
+`sum(idf over A&B) / sum(idf over A|B)`. Preferred to cosine because cosine normalises each
+side independently and so rewards a single rare shared token even when the rest of the record
+disagrees, while this form charges for every unmatched token.
+
+## Measured cost
+
+| | before | after | |
+|---|---|---|---|
+| `keys()` per record | 38.59 us | **3.50 us** | 11.0x |
+| `build`/`prepare` per record | 40.97 us | 35.32 us | 1.16x |
+| record-side total | 79.56 us | **38.82 us** | 2.05x |
+| `score_pair` per pair | 11.40 us | **2.50 us** | 4.56x |
+| full test projection, 1 thread | 2.88 h | **0.69 h** | 4.17x |
+
+End-to-end validation runtime went 1,728s -> 909s (1.90x), consistent with the projection.
+
+Note on the gate: it rejects 94.4% of a *random* pair mix but only 13-20% of the real
+candidate set, because real candidates share a blocking key and therefore always have some
+overlap. The pair-side speedup is real and measured; the 94.4% figure is not representative.
+
+## Open items
+
+- **Candidate recall fell 94.43% -> 93.31%**, dropping the oracle to 0.9756. Channel
+  confidence pushes some true pairs below the 0.34 prefilter. Lowering the prefilter should
+  recover this cheaply.
+- **Singletons regressed, 90.61% -> 68.80% kept empty.** 1,937 polluted singletons cost
+  roughly 0.018 of macro score. A consequence of the lower threshold; the per-entity
+  expected-F_0.5 rule is the principled fix.
+- **India still trails US** (0.7552 vs 0.8267). The multilingual encoder targets exactly
+  this gap and is written but not yet run.

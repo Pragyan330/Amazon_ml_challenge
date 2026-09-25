@@ -1,14 +1,36 @@
-# Stage 1 (rule-based baseline) runs on the Python standard library alone.
-# Pinned versions are what this was developed and measured against.
+# Two environments, deliberately separated.
 #
-# Nothing here reaches the network at runtime. The challenge forbids external databases,
-# APIs and geocoding services for entity resolution, so the pipeline only ever reads the
-# provided TSVs.
-
-# --- stage 1: rule-based baseline ---
-# (no third-party dependencies)
-
-# --- stage 2 onwards, not yet used ---
-# numpy==2.5.2
-# lightgbm==4.6.0        # MIT
-# scikit-learn==1.7.2    # BSD-3, for probability calibration only
+# 1) PIPELINE (blocking, scoring, selection, evaluation) - Python standard library only.
+#    Keeping torch out of the hot loop means the scoring path has no import cost, no CUDA
+#    context and nothing to go wrong on a machine without a GPU. numpy is needed only to
+#    read the embedding memmaps.
+#
+#       python scripts/validate.py --sample-every 20
+#
+numpy==2.5.3            # optional: only to read precomputed name embeddings
+#
+# 2) ENCODER PRECOMPUTE - separate venv, because the CUDA wheel is ~2 GB and the C: system
+#    drive has <20 GB free. Created on D: with:
+#
+#       python -m venv D:\ml_challenge\venv
+#       D:\ml_challenge\venv\Scripts\python.exe -m pip install \
+#           --index-url https://download.pytorch.org/whl/cu130 \
+#           --cache-dir D:/ml_challenge/pipcache torch
+#       D:\ml_challenge\venv\Scripts\python.exe -m pip install sentence-transformers
+#
+#    NOTE: the default PyPI wheel on Windows is CPU-only (torch==2.14.0+cpu). The GPU build
+#    must come from the cu130 index - this GPU is Blackwell (sm_120), which needs CUDA 12.8+,
+#    and cu130 is the newest index carrying a cp314 wheel.
+#
+# torch==2.14.0+cu130
+# sentence-transformers   # pooling handled per model config; avoids hand-rolling it wrong
+#
+# Model licences (challenge requires MIT/Apache-2.0, <=8B parameters):
+#   sentence-transformers/LaBSE          Apache-2.0   471M   <- default
+#   intfloat/multilingual-e5-small       MIT          118M
+#   intfloat/multilingual-e5-base        MIT          278M
+#   BAAI/bge-m3                          MIT          568M
+#
+# 3) STAGE 2 onwards, not yet used
+# lightgbm==4.6.0         # MIT
+# scikit-learn==1.7.2     # BSD-3, probability calibration only

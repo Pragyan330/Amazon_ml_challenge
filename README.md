@@ -14,7 +14,8 @@ Built in stages, simplest first, measuring at each step.
 
 | Stage | Status | Validation macro F_0.5 |
 |---|---|---|
-| 1. Rule-based blocking + scoring | done | **0.7672** |
+| 1. Rule-based blocking + scoring | done | 0.7672 |
+| 1b. Stripped pipeline + Jaccard family + channel confidence | done | **0.7981** |
 | 2. Gradient-boosted matcher | not started | — |
 | 3. Collective S2<->S3 pass + expected-F_0.5 set selection | not started | — |
 | 4. Multilingual encoder for the transliterated tail | not started | — |
