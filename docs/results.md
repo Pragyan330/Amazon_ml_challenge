@@ -182,3 +182,88 @@ overlap. The pair-side speedup is real and measured; the 94.4% figure is not rep
   expected-F_0.5 rule is the principled fix.
 - **India still trails US** (0.7552 vs 0.8267). The multilingual encoder targets exactly
   this gap and is written but not yet run.
+
+---
+
+# Stage 1c - multilingual encoder
+
+**Validation macro F_0.5 = 0.7998** (from 0.7981). LaBSE, Apache-2.0, 471M parameters.
+
+| | stage 1b | stage 1c |
+|---|---|---|
+| macro F_0.5 | 0.7981 | **0.7998** |
+| India | 0.7552 | 0.7603 |
+| US | 0.8262 | 0.8262 |
+| candidate pair recall | 93.31% | 93.43% |
+| true links in candidate set | 357,862 | 358,289 (+427) |
+| runtime (US shard) | 521s | 503s |
+
+957 entities improved against 36 worsened - a 27:1 ratio, so the signal is correct - but the
+scope is small. Non-Latin names are ~7% of Source-2/3 records, and for most of those the
+address channel was already carrying the pair; the encoder only adds where the address is
+*also* weak, which is a thin intersection. Embedding cost 2.8 minutes for 863,419 texts at
+5,155 texts/s, and scoring runtime did not measurably change, so it is kept - but it is not a
+lever.
+
+## Encoder calibration
+
+Measured on 4,000 real non-Latin true pairs before being trusted:
+
+| | mean | p05 | p50 | p95 |
+|---|---|---|---|---|
+| POS (true pair) | 0.871 | 0.741 | 0.889 | 0.939 |
+| NEG-hard (S1 sharing a name token) | 0.563 | 0.340 | 0.568 | 0.750 |
+| NEG-rand (random same-country S1) | 0.399 | 0.135 | 0.425 | 0.599 |
+
+AUC against hard negatives **0.9871**. Cosine >= 0.783 keeps 90% of true pairs while
+admitting 1.93% of hard negatives. The encoder reads transliteration cleanly across scripts:
+Gujarati/Devanagari/Bengali/Tamil/Kannada true pairs all land near 0.88-0.92.
+
+That measurement caught a unit mismatch that would not have raised an error.
+``embeddings.similarity()`` returned ``0.5*(cos+1)`` while the scorer's threshold was written
+as a raw cosine, so the configured 0.55 actually meant a raw cosine of 0.10 - no filtering at
+all - and read the other way it sat exactly on the hard-negative median, admitting half of
+them as genuine name evidence. Both readings were wrong. Everything is now in raw cosine with
+a calibrated band [0.70, 0.95].
+
+The encoder channel also has a monotonicity guard: taking the better of using and ignoring it,
+so extra evidence can never lower a score. Without it, a perfectly good 0.92 cosine dragged a
+strong address match from 0.95 down to 0.86 by diluting the weighted mean.
+
+# Where the remaining score actually is
+
+Decomposition of 383,501 true links at threshold 0.72:
+
+| | count | share of true links |
+|---|---|---|
+| Never entered the candidate set | 25,212 | 6.57% |
+| **In candidates but scored below threshold** | **90,539** | **23.61%** |
+| False positives emitted | 31,073 | - |
+| Singletons polluted | 2,088 / 6,209 | costs 0.0189 of macro score |
+
+Nearly a quarter of all true links are retrieved correctly and then discarded by a scalar
+threshold. That is the bottleneck - not blocking (6.6%), not transliteration (0.2%), not the
+feature set. Micro precision/recall at the optimum is 0.8960 / 0.6982: the threshold is set
+high to protect precision and recall pays for it.
+
+This is what the metric derivation predicts. The break-even probability for emitting one more
+match is ``0.8 * F_current``, so the bar must rise per entity as matches accumulate, and one
+global number cannot express that. Per-entity expected-F_0.5 selection targets the 23.61%
+directly and needs no model, no GPU and no new data. It should also fix the singleton leak:
+an entity whose candidates are all weak would choose the empty set on its own.
+
+Oracle over the current candidate set is 0.9756 against 0.7998 achieved.
+
+# Parallelism
+
+``src/ber/parallel.py`` shards Source 1 across processes; each worker builds its own index and
+streams all of Source 2/3 past it. Record-side work is duplicated per worker while pair-side
+work divides, so wall time is ``record_side + pair_side / W`` - for the full test set
+13.2 + 159.7/W minutes, about 23 minutes at W=16 against 2.9 hours single-threaded. That is
+~7.5x, not the 12x first estimated: the estimate ignored the duplicated normalisation.
+
+Sharding Source 2/3 instead would divide both halves but needs ~2.5 GB of prepared records per
+worker for the India shard, capping out near four workers and landing slower.
+
+Partitioning is unit-tested for disjointness, completeness and balance across 1/4/7/16 chunks,
+composed with the validation subsample.

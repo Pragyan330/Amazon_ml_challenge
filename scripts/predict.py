@@ -3,17 +3,18 @@
 Writes both files the challenge requires into ``output/``:
 
 * ``matching_results.tsv`` - the final matches, the only file scored on the leaderboard.
-* ``candidate_pairs.tsv``  - the candidate set fed to the matcher, i.e. everything that
+* ``candidate_pairs.tsv``  - the candidate set the matcher scored, i.e. everything that
   cleared the prefilter. Final matches are a strict subset by construction.
 
-Every Source-1 entity gets exactly one row, with an empty second field when we predict no
-matches; a missing row causes outright rejection.
+Every Source-1 entity gets exactly one row, with an empty second field where we predict no
+matches. A missing row causes outright rejection, so the row order is read back from the test
+file itself rather than from whatever the shards happened to produce.
 
-    python scripts/predict.py --threshold 0.60
+    python scripts/predict.py --threshold 0.725 --workers 16
 
-Countries are processed one at a time and Source 1 can be further chunked with
-``--s1-chunk`` if memory is tight - each chunk costs one extra pass over Source 2/3, so
-leave it unset unless a shard does not fit.
+IDF is rebuilt from the *test* sources, not reused from training: the statistics must
+describe the pool being scored against, and the test set carries 23% more Source-2/3 records
+per Source-1 entity than training does.
 """
 
 import argparse
@@ -24,116 +25,101 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from ber.blocking import Blocker, build_corpus_stats, idf_from_df
+from ber.blocking import build_corpus_stats
+from ber.config import ARTIFACTS, EMBEDDINGS, OUTPUT, TEST, WORK, ensure_dirs, test_paths
 from ber.dataio import CANDIDATE_HEADER, MATCHING_HEADER, country_counts, write_id_lists
-from ber.pipeline import as_id_map, run_shard
-from ber.scorer import Weights
+from ber.parallel import run_parallel
 from ber.select import select_threshold
-
-ROOT = os.path.join(os.path.dirname(__file__), "..")
-TEST = os.path.join(ROOT, "student_resource", "dataset", "test")
-CACHE = os.path.join(ROOT, "artifacts")
-OUT = os.path.join(ROOT, "output")
 
 
 def log(msg):
     print(f"{time.strftime('%H:%M:%S')}  {msg}", flush=True)
 
 
-def chunker(chunk_index, n_chunks):
-    """Keep Source-1 entities whose id hashes into this chunk."""
-    if n_chunks <= 1:
-        return None
-
-    def keep(eid):
-        try:
-            return int(eid.split("-", 1)[1]) % n_chunks == chunk_index
-        except (IndexError, ValueError):
-            return chunk_index == 0
-    return keep
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--threshold", type=float, required=True,
                     help="final decision threshold, tuned by scripts/validate.py")
+    ap.add_argument("--workers", type=int, default=0, help="0 = cpu_count - 1")
+    ap.add_argument("--chunks-per-country", type=int, default=0, help="0 = same as workers")
     ap.add_argument("--df-cap", type=int, default=60)
     ap.add_argument("--max-posting", type=int, default=200)
     ap.add_argument("--prefilter", type=float, default=0.34)
     ap.add_argument("--topk", type=int, default=40)
     ap.add_argument("--max-k", type=int, default=None,
                     help="optional cap on matches emitted per entity")
-    ap.add_argument("--s1-chunk", type=int, default=1,
-                    help="split each country's Source 1 into this many chunks")
+    ap.add_argument("--embeddings", default=None,
+                    help="basename under the embeddings dir, e.g. test_names")
     args = ap.parse_args()
 
-    s1 = os.path.join(TEST, "test_source1.tsv")
-    s23 = [os.path.join(TEST, "test_source2.tsv"), os.path.join(TEST, "test_source3.tsv")]
+    ensure_dirs()
+    paths = test_paths()
+    s1, s23 = paths["s1"], paths["s23"]
 
-    # Corpus statistics come from the *test* sources: IDF must reflect the pool we are
-    # actually scoring against, and the test set is 23% denser in S2/S3 per S1 than train.
-    stats_path = os.path.join(CACHE, "corpus_stats_test.pkl")
+    stats_path = os.path.join(ARTIFACTS, "corpus_stats_test.pkl")
     if os.path.exists(stats_path):
-        log("loading cached test corpus stats")
-        with open(stats_path, "rb") as fh:
-            df_name, df_addr, n_docs = pickle.load(fh)
+        log(f"using cached test corpus stats: {stats_path}")
     else:
-        log("building test corpus statistics...")
+        log("building test corpus statistics (1-in-10 sample of test S2/S3) ...")
         df_name, df_addr, n_docs = build_corpus_stats(s23, sample_every=10)
-        os.makedirs(CACHE, exist_ok=True)
         with open(stats_path, "wb") as fh:
             pickle.dump((df_name, df_addr, n_docs), fh)
-    log(f"corpus: {n_docs:,} sampled docs")
-
-    idf_name, default_idf = idf_from_df(df_name, n_docs)
-    idf_addr, _ = idf_from_df(df_addr, n_docs)
-    weights = Weights()
+        log(f"corpus: {n_docs:,} sampled docs, {len(df_name):,} name / "
+            f"{len(df_addr):,} address tokens")
 
     counts = country_counts(s1)
     log(f"test Source 1 by country: {counts}")
+    countries = sorted(counts, key=lambda c: -counts[c])
 
-    matches, candidates = {}, {}
-    for country in sorted(counts, key=lambda c: -counts[c]):
-        for chunk in range(args.s1_chunk):
-            blocker = Blocker(df_name, df_addr, df_cap=args.df_cap,
-                              max_posting=args.max_posting)
-            result = run_shard(country, s1, s23, blocker, idf_name, idf_addr, default_idf,
-                               weights, prefilter=args.prefilter, topk=args.topk,
-                               s1_keep=chunker(chunk, args.s1_chunk), log=log)
-            for eid, scored in as_id_map(result).items():
-                candidates[eid] = [tid for _, tid in scored]
-                matches[eid] = select_threshold(scored, args.threshold, args.max_k)
-            del blocker, result
+    workers = args.workers or max(1, (os.cpu_count() or 4) - 1)
+    scored, _, shard_stats = run_parallel(
+        countries, s1, s23, stats_path, os.path.join(WORK, "tmp"),
+        workers=workers, chunks_per_country=args.chunks_per_country or workers,
+        prefilter=args.prefilter, topk=args.topk, df_cap=args.df_cap,
+        max_posting=args.max_posting,
+        emb_dir=EMBEDDINGS if args.embeddings else None, emb_name=args.embeddings,
+        log=log)
 
-    # Read the id order straight from the test file so every entity appears exactly once.
+    total_considered = sum(s["pairs_considered"] for s in shard_stats)
+    total_scanned = sum(s["s23_scanned"] for s in shard_stats)
+    log(f"{total_scanned:,} record-scans, {total_considered:,} pairs considered")
+
+    # --- write output in test-file order so no entity is missing ---
     order = []
     with open(s1, encoding="utf-8") as fh:
         fh.readline()
         for line in fh:
-            eid = line[:line.find("\t")]
-            if eid:
-                order.append(eid)
-    missing = [e for e in order if e not in matches]
-    if missing:
-        log(f"WARNING: {len(missing):,} entities never reached a shard; emitting empty rows")
-        for e in missing:
-            matches[e] = []
-            candidates[e] = []
+            i = line.find("\t")
+            if i > 0:
+                order.append(line[:i])
 
-    n_m = write_id_lists(os.path.join(OUT, "matching_results.tsv"),
-                         ((e, matches[e]) for e in order), MATCHING_HEADER)
-    n_c = write_id_lists(os.path.join(OUT, "candidate_pairs.tsv"),
-                         ((e, candidates[e]) for e in order), CANDIDATE_HEADER)
-    total_m = sum(len(v) for v in matches.values())
-    total_c = sum(len(v) for v in candidates.values())
-    empties = sum(1 for v in matches.values() if not v)
+    missing = sum(1 for e in order if e not in scored)
+    if missing:
+        log(f"WARNING: {missing:,} entities produced no shard entry; emitting empty rows")
+
+    def rows(final):
+        for eid in order:
+            sc = scored.get(eid) or []
+            yield eid, (select_threshold(sc, args.threshold, args.max_k) if final
+                        else [t for _, t in sc])
+
+    n_m = write_id_lists(os.path.join(OUTPUT, "matching_results.tsv"), rows(True),
+                         MATCHING_HEADER)
+    n_c = write_id_lists(os.path.join(OUTPUT, "candidate_pairs.tsv"), rows(False),
+                         CANDIDATE_HEADER)
+
+    links = sum(len(select_threshold(scored.get(e) or [], args.threshold, args.max_k))
+                for e in order)
+    cands = sum(len(scored.get(e) or []) for e in order)
+    empties = sum(1 for e in order
+                  if not select_threshold(scored.get(e) or [], args.threshold, args.max_k))
     log("")
-    log(f"matching_results.tsv : {n_m:,} rows, {total_m:,} links, "
-        f"{total_m / max(1, n_m):.2f}/entity, {empties:,} empty ({empties / max(1, n_m):.2%})")
-    log(f"candidate_pairs.tsv  : {n_c:,} rows, {total_c:,} candidates, "
-        f"{total_c / max(1, n_c):.2f}/entity")
+    log(f"matching_results.tsv : {n_m:,} rows, {links:,} links, "
+        f"{links / max(1, n_m):.2f}/entity, {empties:,} empty ({empties / max(1, n_m):.2%})")
+    log(f"candidate_pairs.tsv  : {n_c:,} rows, {cands:,} candidates, "
+        f"{cands / max(1, n_c):.2f}/entity")
     log("")
-    log("now validate the format:")
+    log("validate the format before submitting:")
     log("  python student_resource/utils/validate_submission.py \\")
     log("      --matching output/matching_results.tsv \\")
     log("      --candidate output/candidate_pairs.tsv \\")
