@@ -47,8 +47,13 @@ def log(msg):
     print(f"{time.strftime('%H:%M:%S')}  {msg}", flush=True)
 
 
-def collect(split, all_targets):
-    """Yield (entity_id, name) for every record that needs a vector."""
+def collect(split, all_targets, s1_every=1):
+    """Yield (entity_id, name) for every record that needs a vector.
+
+    ``s1_every`` subsamples Source 1 with the same 1-in-N rule ``scripts/validate.py`` uses,
+    so a validation experiment does not pay to embed all 2.2M training entities. Source-2/3
+    targets are never subsampled: we cannot know in advance which will become candidates.
+    """
     base = TRAIN if split == "train" else TEST
     prefix = f"{split}_source"
     # Source 1: always embedded, it is the reference side of every comparison.
@@ -62,6 +67,12 @@ def collect(split, all_targets):
                     continue
                 if only_non_latin and is_latin(parts[1]):
                     continue
+                if source == 1 and s1_every > 1:
+                    try:
+                        if int(parts[0].split("-", 1)[1]) % s1_every:
+                            continue
+                    except (IndexError, ValueError):
+                        continue
                 yield parts[0], parts[1]
 
 
@@ -72,6 +83,8 @@ def main():
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--all-targets", action="store_true",
                     help="embed every S2/S3 name, not just non-Latin ones")
+    ap.add_argument("--s1-every", type=int, default=1,
+                    help="subsample Source 1 1-in-N (match scripts/validate.py)")
     ap.add_argument("--limit", type=int, default=0, help="stop after N texts (smoke test)")
     args = ap.parse_args()
 
@@ -93,7 +106,7 @@ def main():
 
     log(f"collecting texts for split={args.split} ...")
     ids, texts = [], []
-    for eid, name in collect(args.split, args.all_targets):
+    for eid, name in collect(args.split, args.all_targets, args.s1_every):
         ids.append(eid)
         texts.append(name)
         if args.limit and len(ids) >= args.limit:
@@ -108,7 +121,8 @@ def main():
     dim = model.get_sentence_embedding_dimension()
     log(f"embedding dimension {dim}")
 
-    out = os.path.join(EMBEDDINGS, f"{args.split}_names")
+    tag = args.split if args.s1_every == 1 else f"{args.split}_s1every{args.s1_every}"
+    out = os.path.join(EMBEDDINGS, f"{tag}_names")
     vec_path = out + ".f16"
     mm = np.memmap(vec_path, dtype=np.float16, mode="w+", shape=(len(ids), dim))
 
@@ -131,6 +145,7 @@ def main():
     with open(out + ".meta.json", "w", encoding="utf-8") as fh:
         json.dump({"model": hf_id, "licence": licence, "params": params, "dim": dim,
                    "count": len(ids), "split": args.split, "fp16": True,
+                   "s1_every": args.s1_every,
                    "normalised": True, "all_targets": bool(args.all_targets)}, fh, indent=2)
 
     size_gb = os.path.getsize(vec_path) / 1e9

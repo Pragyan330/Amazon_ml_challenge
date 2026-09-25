@@ -57,6 +57,8 @@ def main():
     ap.add_argument("--prefilter", type=float, default=0.34)
     ap.add_argument("--topk", type=int, default=40)
     ap.add_argument("--countries", default="US,India")
+    ap.add_argument("--embeddings", default=None,
+                    help="basename under the embeddings dir, e.g. train_s1every20_names")
     ap.add_argument("--out", default=os.path.join(CACHE, "val_scored.pkl"))
     args = ap.parse_args()
 
@@ -90,6 +92,17 @@ def main():
     weights = Weights()
     log(f"weights: {weights}")
 
+    emb = None
+    if args.embeddings:
+        from ber.config import EMBEDDINGS
+        from ber.embeddings import load
+        emb = load(EMBEDDINGS, args.embeddings)
+        if emb is None:
+            log(f"WARNING: no embeddings found at {EMBEDDINGS}/{args.embeddings}.* "
+                f"- running without the encoder")
+        else:
+            log(f"encoder: {emb.model} dim={emb.dim} vectors={emb.count:,}")
+
     scored_map = {}
     country_of = {}
     all_stats = {}
@@ -98,7 +111,7 @@ def main():
                           max_posting=args.max_posting)
         result = run_shard(country, s1, s23, blocker, idf_name, idf_addr, default_idf,
                            weights, prefilter=args.prefilter, topk=args.topk,
-                           s1_keep=keep, log=log)
+                           s1_keep=keep, log=log, emb=emb)
         shard_map = as_id_map(result)
         scored_map.update(shard_map)
         for eid in shard_map:

@@ -49,11 +49,11 @@ class Weights:
     """
 
     __slots__ = ("n_wj", "n_ct", "n_ng", "a_wj", "a_ng", "c_name", "c_addr", "c_num",
-                 "emb_trust", "emb_floor", "conf")
+                 "emb_lo", "emb_hi", "conf")
 
     def __init__(self, n_wj=0.45, n_ct=0.20, n_ng=0.35, a_wj=0.60, a_ng=0.40,
                  c_name=0.45, c_addr=0.42, c_num=0.13,
-                 emb_trust=0.85, emb_floor=0.55, conf=None):
+                 emb_lo=0.70, emb_hi=0.95, conf=None):
         self.n_wj = n_wj      # name: IDF-weighted Jaccard
         self.n_ct = n_ct      # name: containment (truncation)
         self.n_ng = n_ng      # name: character trigram Dice (typos, domains)
@@ -62,11 +62,14 @@ class Weights:
         self.c_name = c_name  # channel weight: name
         self.c_addr = c_addr  # channel weight: address
         self.c_num = c_num    # channel weight: street number
-        # Encoder-derived name evidence is softer than a string match, so it is discounted;
-        # and below emb_floor the cosine is treated as no evidence rather than disagreement,
-        # since multilingual encoders put unrelated short texts around 0.5-0.6.
-        self.emb_trust = emb_trust
-        self.emb_floor = emb_floor
+        # Raw-cosine band mapped onto [0, 1] for the name channel. Calibrated on 4,000 real
+        # non-Latin true pairs with LaBSE (AUC 0.987 against hard negatives):
+        #   POS       mean 0.871, p05 0.741, p50 0.889
+        #   NEG-hard  mean 0.563, p50 0.568, p95 0.750   (S1 sharing a name token)
+        # emb_lo=0.70 sits below the 5th percentile of positives but above the hard-negative
+        # median, so ~96% of true pairs keep evidence while most hard negatives map to zero.
+        self.emb_lo = emb_lo
+        self.emb_hi = emb_hi
         self.conf = conf if conf is not None else [
             0.00,  # 0  no evidence
             0.45,  # 1  name only      <- deliberately low: 13x more likely a false merge
@@ -102,7 +105,7 @@ def score_pair(r1, r2, idf_name, idf_addr, default_idf, w, emb_sim=None):
     if jn < GATE and ja < GATE:
         # A non-Latin name can never clear the name side of the gate, so an encoder score
         # is the only thing that can rescue such a pair.
-        if not (emb_sim is not None and not r2.latin and emb_sim >= w.emb_floor):
+        if not (emb_sim is not None and not r2.latin and emb_sim >= w.emb_lo):
             return 0.0
 
     mask = 0
@@ -134,11 +137,14 @@ def score_pair(r1, r2, idf_name, idf_addr, default_idf, w, emb_sim=None):
         mask |= HAS_NAME
         return (acc / tot) * w.conf[mask] if tot > 0.0 else 0.0
 
-    if emb_sim is not None and emb_sim >= w.emb_floor:
-        # Stretch [emb_floor, 1] onto [0, 1]: multilingual encoders place unrelated short
-        # texts around 0.5-0.6, so the raw cosine floor is not meaningful signal.
-        s = (emb_sim - w.emb_floor) / (1.0 - w.emb_floor)
-        with_name = ((acc + w.c_name * w.emb_trust * s) / (tot + w.c_name)
+    if emb_sim is not None and emb_sim >= w.emb_lo:
+        # Map the calibrated raw-cosine band [emb_lo, emb_hi] onto [0, 1] and clip. A plain
+        # stretch to 1.0 would compress true pairs into the bottom half of the range, since
+        # positives top out near 0.94 rather than 1.0.
+        s = (emb_sim - w.emb_lo) / (w.emb_hi - w.emb_lo)
+        if s > 1.0:
+            s = 1.0
+        with_name = ((acc + w.c_name * s) / (tot + w.c_name)
                      * w.conf[mask | HAS_NAME])
         # Take the better of using the encoder and ignoring it, so adding evidence can never
         # lower a score. Without this, a strong address match (conf 0.95, base 1.0 -> 0.95)

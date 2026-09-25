@@ -33,8 +33,28 @@ class ShardResult:
         self.stats = stats
 
 
+def _s1_vector_matrix(emb, s1_ids):
+    """Stack Source-1 vectors into one array aligned with slot numbers.
+
+    Needed so that a non-Latin target can be compared against all of its candidate slots in
+    a single numpy dot product. Doing it per pair costs a dict lookup plus a 768-dim
+    conversion each time, which is far slower than the string features it is meant to
+    supplement. Rows for entities with no vector are left at zero and masked out by the
+    caller via ``have``.
+    """
+    import numpy as np
+    mat = np.zeros((len(s1_ids), emb.dim), dtype=np.float16)
+    have = np.zeros(len(s1_ids), dtype=bool)
+    for slot, eid in enumerate(s1_ids):
+        row = emb.row_of.get(eid)
+        if row is not None:
+            mat[slot] = emb.vectors[row]
+            have[slot] = True
+    return mat, have
+
+
 def run_shard(country, s1_path, s23_paths, blocker, idf_name, idf_addr, default_idf,
-              weights, prefilter=0.34, topk=40, s1_keep=None, log=None):
+              weights, prefilter=0.34, topk=40, s1_keep=None, log=None, emb=None):
     """Generate and score candidates for every Source-1 entity in one country.
 
     ``prefilter`` is the final blocking stage and is what ``candidate_pairs.tsv`` reports;
@@ -58,9 +78,17 @@ def run_shard(country, s1_path, s23_paths, blocker, idf_name, idf_addr, default_
     say(f"indexed: {st['keys']:,} keys, {st['postings']:,} postings, "
         f"{st['dropped_keys']:,} dropped as too common")
 
+    # --- optional multilingual encoder, for non-Latin target names only ---
+    s1_mat = s1_have = None
+    if emb is not None:
+        import numpy as np
+        s1_mat, s1_have = _s1_vector_matrix(emb, s1_ids)
+        say(f"encoder: {int(s1_have.sum()):,}/{len(s1_ids):,} S1 vectors "
+            f"({emb.model}, dim {emb.dim})")
+
     # --- stream Sources 2 and 3 past the index ---
     cand = {}
-    scanned = considered = kept = gated = 0
+    scanned = considered = kept = gated = emb_used = 0
     index = blocker.index
     keys_of = blocker.keys
     for path in s23_paths:
@@ -75,8 +103,21 @@ def run_shard(country, s1_path, s23_paths, blocker, idf_name, idf_addr, default_
             if not slots:
                 continue
             considered += len(slots)
+
+            # One dot product against every candidate slot, rather than one per pair.
+            emb_sims = None
+            if s1_mat is not None and not rec.latin:
+                vec = emb.get(eid)
+                if vec is not None:
+                    order = sorted(slots)
+                    dots = s1_mat[order].astype(np.float32) @ vec.astype(np.float32)
+                    emb_sims = {sl: float(d) for sl, d, ok in
+                                zip(order, dots, s1_have[order]) if ok}
+                    emb_used += 1
+
             for slot in slots:
-                s = score_pair(s1_recs[slot], rec, idf_name, idf_addr, default_idf, weights)
+                s = score_pair(s1_recs[slot], rec, idf_name, idf_addr, default_idf, weights,
+                               emb_sim=emb_sims.get(slot) if emb_sims else None)
                 if s < prefilter:
                     if s == 0.0:
                         gated += 1
@@ -107,6 +148,7 @@ def run_shard(country, s1_path, s23_paths, blocker, idf_name, idf_addr, default_
         "candidates_per_s1": kept / max(1, len(s1_ids)),
         "considered_per_s1": considered / max(1, len(s1_ids)),
         "gate_reject_rate": gated / max(1, considered),
+        "encoder_records": emb_used,
         "seconds": elapsed,
         "us_per_pair": elapsed / max(1, considered) * 1e6,
     }

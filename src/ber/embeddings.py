@@ -49,10 +49,15 @@ class NameEmbeddings:
         return None if row is None else self.vectors[row]
 
     def similarity(self, id_a, id_b):
-        """Cosine similarity in [0, 1], or None when either side has no vector.
+        """**Raw** cosine similarity, or None when either side has no vector.
 
-        Vectors are pre-normalised so this is a dot product. The raw cosine is rescaled from
-        [-1, 1] to [0, 1] to match the range of every other feature in the scorer.
+        Vectors are pre-normalised, so this is a dot product.
+
+        Returned raw rather than rescaled to [0, 1] on purpose. An earlier version returned
+        ``0.5 * (cos + 1)``, which silently disagreed with the scorer's ``emb_lo`` threshold:
+        a threshold of 0.55 meant a raw cosine of 0.10 in that space - no filtering at all -
+        while read as a raw cosine it sat exactly on the hard-negative median. Calibration is
+        measured in raw cosine, so that is the unit used everywhere.
         """
         ra = self.row_of.get(id_a)
         if ra is None:
@@ -62,11 +67,7 @@ class NameEmbeddings:
             return None
         dot = float(np.dot(self.vectors[ra].astype(np.float32),
                            self.vectors[rb].astype(np.float32)))
-        if dot < -1.0:
-            dot = -1.0
-        elif dot > 1.0:
-            dot = 1.0
-        return 0.5 * (dot + 1.0)
+        return -1.0 if dot < -1.0 else (1.0 if dot > 1.0 else dot)
 
 
 def load(directory, name="names"):
