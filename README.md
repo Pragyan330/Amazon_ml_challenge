@@ -17,8 +17,9 @@ Built in stages, simplest first, measuring at each step.
 | 1. Rule-based blocking + scoring | done | 0.7672 |
 | 1b. Stripped pipeline + Jaccard family + channel confidence | done | 0.7981 |
 | 1c. Multilingual encoder (LaBSE) for the transliterated tail | done | **0.7998** |
-| 2. Gradient-boosted matcher | not started | — |
-| 3. Expected-F_0.5 set selection + collective S2<->S3 pass | **next** — targets the 23.61% of true links retrieved but discarded | — |
+| 2. Gradient-boosted matcher (LightGBM, 35 features) | done | 0.8727 |
+| 3. Expected-F_0.5 set selection (exact) | done | **0.9249** |
+| 4. Raise candidate recall (6.57% of links never blocked) | **next** — oracle 0.9758 now caps us | — |
 
 
 Measured results and error analysis: [`docs/results.md`](docs/results.md).

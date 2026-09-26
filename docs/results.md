@@ -267,3 +267,90 @@ worker for the India shard, capping out near four workers and landing slower.
 
 Partitioning is unit-tested for disjointness, completeness and balance across 1/4/7/16 chunks,
 composed with the validation subsample.
+
+---
+
+# Stage 2+3 - learned matcher and expected-F_0.5 set selection
+
+**Validation macro F_0.5 = 0.9249** (rule baseline 0.7994 on the same split).
+
+LightGBM over 35 pairwise features, reranking the rule pipeline's candidate set. Measured on
+22,110 held-out entities; train/calib/test splits are entity-disjoint and only the test split
+is ever reported.
+
+| | macro F_0.5 |
+|---|---|
+| Rule baseline, threshold 0.725 | 0.7994 |
+| GBM + best fixed threshold (0.50) | 0.8727 |
+| **GBM + expected-F_0.5, exact** | **0.9249** |
+| GBM + expected-F_0.5, uncalibrated probabilities | 0.9251 |
+| GBM + expected-F_0.5, ratio approximation | 0.9243 |
+| Oracle over the same candidate set | 0.9758 |
+
+Model: 1,386 rounds, calib AUC 0.99797, 94s to train. Selection runs in 4.5s for 22,110
+entities.
+
+| | rule | GBM + expected-F_0.5 |
+|---|---|---|
+| micro precision | 0.9011 | 0.9767 |
+| micro recall | 0.6876 | 0.8510 |
+| singletons kept empty | 68.80% | **83.97%** |
+| India | 0.7552 | 0.9064 |
+| US | 0.8267 | 0.9374 |
+
+## What actually produced the gain
+
+**Set selection, not the model.** The GBM with a fixed threshold gives 0.8727; swapping the
+threshold for per-entity expected-F_0.5 adds a further **+0.0522**. That is the single largest
+improvement in the project so far and it needed no extra features, no extra data and 4.5
+seconds of compute. It is exactly what the error decomposition predicted: 23.61% of true links
+were sitting inside the candidate set and being discarded by a scalar threshold.
+
+It also repaired the singleton leak on its own - 68.80% to 83.97% kept empty - because an
+entity whose candidates are all weak now chooses the empty set rather than being dragged over
+a global threshold.
+
+## Two predictions that did not survive contact
+
+**Calibration turned out to be unnecessary.** The three-way split existed specifically to
+calibrate honestly, and the answer is that LightGBM's binary-logloss output was already
+calibrated: weighted calibration error 0.0006 raw against 0.0001 after isotonic, and the
+*uncalibrated* probabilities actually scored marginally higher (0.9251 vs 0.9249, within
+noise). The isotonic step is dead weight here. The methodology still matters - fitting a
+calibrator in-sample would have made this impossible to detect - but the correction it applies
+is nil.
+
+**The exact selector beats the ratio approximation by 0.0006**, not the margin the theory
+suggested. The approximation disagrees with the exact computation on 4.2% of entities, but
+those disagreements are concentrated on entities where both choices score almost the same.
+The exact version is verified against Monte Carlo (max error 0.0013 against ~0.002 MC noise)
+and costs nothing, so it stays - but it is not where the points are.
+
+## Feature importance (gain)
+
+| feature | gain |
+|---|---|
+| base_score (rule score) | 5,680,602 |
+| rank (position within entity) | 654,288 |
+| num_score | 382,504 |
+| n_gram_dice | 343,110 |
+| a_cont | 247,520 |
+| a_gram_dice | 156,931 |
+| len_ratio_addr | 147,527 |
+| emb_cos (LaBSE) | 130,362 |
+
+The rule score dominates, so the hand-built scorer is doing real work rather than being
+replaced. `rank` is second, which vindicates the per-entity competition features: matching is
+a contest within an entity and an absolute similarity cannot express that. The encoder cosine
+earns its place at eighth.
+
+## The ceiling is now candidate recall
+
+At 0.9249 against an oracle of 0.9758, the matcher captures 94.8% of what this candidate set
+allows. **The leaderboard leader is at 0.98, which this candidate set cannot reach even with a
+perfect matcher.** The binding constraint has moved from the matcher to blocking: 6.57% of
+true links never enter the candidate set.
+
+The measured blocking union ceiling (name-4gram OR address-token) is 99.98%, so that recall is
+reachable. It is being lost in the 0.34 prefilter and the df-capped keys, both of which were
+tightened for speed. That is the next target.
