@@ -134,9 +134,12 @@ produced a candidate explosion (values like `1` and `100` are ubiquitous) that r
 of RAM before we caught it. Every standalone key additionally carries a document-frequency
 cap.
 
-**Candidate pairs generated.** [FILL IN from the final run: total and per-entity.] The
-candidate set is the last filtering stage before the matcher, i.e. exactly the pairs the
-model runs inference over.
+**Candidate pairs generated.** 38,196,413 across 1,732,544 Source-1 entities, i.e. **22.05
+per entity**, against a full cross-product of 1.73M x 9.97M. That is a reduction ratio of
+2.2e-06, or one pair retained per 452,000 possible. The candidate set is the last filtering
+stage before the matcher: exactly the pairs the model runs inference over, and a strict
+superset of the final matches. 653,923,969 pairs were considered during blocking before this
+filter.
 
 **Recall/size trade-off.** We measured it rather than guessing. Holding the matcher fixed,
 the achieved score is flat from ~22 candidates per entity down to ~4.5, because everything
