@@ -54,7 +54,8 @@ def _s1_vector_matrix(emb, s1_ids):
 
 
 def run_shard(country, s1_path, s23_paths, blocker, idf_name, idf_addr, default_idf,
-              weights, prefilter=0.34, topk=40, s1_keep=None, log=None, emb=None):
+              weights, prefilter=0.34, topk=40, s1_keep=None, log=None, emb=None,
+              feature_fn=None):
     """Generate and score candidates for every Source-1 entity in one country.
 
     ``prefilter`` is the final blocking stage and is what ``candidate_pairs.tsv`` reports;
@@ -115,12 +116,31 @@ def run_shard(country, s1_path, s23_paths, blocker, idf_name, idf_addr, default_
                                 zip(order, dots, s1_have[order]) if ok}
                     emb_used += 1
 
+            is_s3 = eid[1] == "3"
             for slot in slots:
+                cos = emb_sims.get(slot) if emb_sims else None
                 s = score_pair(s1_recs[slot], rec, idf_name, idf_addr, default_idf, weights,
-                               emb_sim=emb_sims.get(slot) if emb_sims else None)
+                               emb_sim=cos)
                 if s < prefilter:
                     if s == 0.0:
                         gated += 1
+                    continue
+                if feature_fn is not None:
+                    # Features are built here, while both records are already in hand.
+                    # Deferring them would mean rebuilding up to 10M Rec objects later,
+                    # which does not fit in memory; doing it inside the worker keeps each
+                    # shard's feature block small and never ships it to the parent.
+                    bucket = cand.get(slot)
+                    row = feature_fn(s1_recs[slot], rec, s, cos, is_s3)
+                    if bucket is None:
+                        cand[slot] = [(s, eid, row)]
+                        kept += 1
+                    else:
+                        bucket.append((s, eid, row))
+                        kept += 1
+                        if len(bucket) > 3 * topk:
+                            bucket.sort(key=lambda x: -x[0])
+                            del bucket[topk:]
                     continue
                 bucket = cand.get(slot)
                 if bucket is None:
@@ -135,8 +155,11 @@ def run_shard(country, s1_path, s23_paths, blocker, idf_name, idf_addr, default_
                 say(f"scanned {scanned:,}, kept {kept:,} ({time.time() - t0:.0f}s)")
         say(f"finished {os.path.basename(path)} (scanned {scanned:,})")
 
+    # Sort by score only: feature rows are lists and would raise on a tie comparison.
     for bucket in cand.values():
-        bucket.sort(reverse=True)
+        bucket.sort(key=lambda x: -x[0])
+        if len(bucket) > topk:
+            del bucket[topk:]
 
     elapsed = time.time() - t0
     stats = {
