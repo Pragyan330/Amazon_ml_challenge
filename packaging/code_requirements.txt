@@ -1,0 +1,27 @@
+# Runtime requirements for the submitted configuration.
+# Versions are the ones this was developed and measured against.
+
+numpy==2.5.3
+lightgbm==4.7.0          # MIT
+
+# Optional: the multilingual encoder, disabled in the submitted configuration (see README
+# section 5). Needed only to run scripts/embed_names.py.
+#
+#   pip install --index-url https://download.pytorch.org/whl/cu130 torch==2.14.0+cu130
+#   pip install sentence-transformers==6.1.0
+#
+# Note: the default PyPI torch wheel on Windows is CPU-only. The GPU build must come from a
+# CUDA index; cu130 is the newest one carrying a cp314 wheel, and Blackwell (sm_120) needs
+# CUDA 12.8 or later.
+#
+# torch==2.14.0+cu130
+# sentence-transformers==6.1.0
+#
+# Model licences (challenge requires MIT/Apache-2.0 and <=8B parameters):
+#   lightgbm                              MIT          <1M
+#   sentence-transformers/LaBSE           Apache-2.0    471M
+
+# Used only by scripts/train_matcher.py for optional probability calibration; the submitted
+# configuration does not apply it, because LightGBM's output was already calibrated
+# (weighted calibration error 0.0006 raw against 0.0001 after isotonic).
+scikit-learn==1.9.1      # BSD-3-Clause
