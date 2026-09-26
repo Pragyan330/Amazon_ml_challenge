@@ -204,7 +204,8 @@ approximate one, precisely at the singleton decision where an error costs a full
 
 ## 5. Results & Error Analysis
 
-**F_0.5 Score (macro):** **0.9249** on 22,110 held-out entities. Splits are entity-disjoint
+**F_0.5 Score (macro):** **0.9196** on 22,110 held-out entities (0.9249 with the optional
+encoder enabled). Public leaderboard: 0.863 for an earlier configuration; see below. Splits are entity-disjoint
 (train / calibration / test) and only the test split is reported.
 
 | Configuration | macro F_0.5 |
@@ -212,7 +213,8 @@ approximate one, precisely at the singleton decision where an error costs a full
 | All-empty submission | 0.0558 |
 | Rule scorer, best fixed threshold | 0.7994 |
 | LightGBM, best fixed threshold | 0.8727 |
-| **LightGBM + expected-F_0.5 selection** | **0.9249** |
+| **LightGBM + expected-F_0.5 selection** | **0.9196** |
+| ... with the optional multilingual encoder | 0.9249 |
 | Oracle over the same candidate set | 0.9758 |
 
 Micro precision/recall 0.9767 / 0.8510. Singletons correctly left empty: 83.97%, up from
@@ -270,7 +272,26 @@ exact end-to-end commands. Entry points, in order:
 Core modules under `src/ber/`: `normalize`, `record`, `blocking`, `scorer`, `pairfeatures`,
 `setselect`, `evaluate`, `dataio`, `pipeline`, `submitworker`.
 
-### B. Additional Results
+### B. Global assignment
+
+The ground truth guarantees each Source-2/3 record belongs to exactly one Source-1 entity
+(zero exceptions in 7,638,365 matched ids), but per-entity selection cannot enforce it
+because competing entities are processed in different shards. Our first submission violated
+it on 75,823 records, implying at least 179,788 provably-wrong links.
+
+Selection is therefore global: each contested record is awarded to its most confident
+claimant, and the losers **re-select** from what remains rather than having the record
+deleted, since losing one member changes how many of the rest are worth emitting. This
+iterates to a fixed point, because re-selection promotes new candidates that can collide
+with other entities' choices - a single pass left 4,411 records contested out of an initial
+86,441. On the full test set this removed 189,586 links (5,385,128 -> 5,195,542) and moved
+the empty-prediction rate from 7.4% to 5.5%, against a true singleton rate of 5.58%.
+
+This effect is invisible on a subsampled validation split: with 1-in-20 of Source 1, two
+entities competing for the same record almost never co-occur (8 contested records against
+75,823 in the full run). It can only be measured at full scale.
+
+### C. Additional Results
 
 **Metric mechanics.** With P = tp/p and R = tp/t, precision and recall cancel:
 `F_beta = (1 + b^2) * tp / (b^2 * t + p)`. Differentiating gives

@@ -354,3 +354,89 @@ true links never enter the candidate set.
 The measured blocking union ceiling (name-4gram OR address-token) is 99.98%, so that recall is
 reachable. It is being lost in the 0.34 prefilter and the df-capped keys, both of which were
 tightened for speed. That is the next target.
+
+---
+
+# Submission 2 — encoder mismatch fixed, global assignment added
+
+Public leaderboard for submission 1: **0.863** (predicted 0.87-0.92, so the estimate was
+about 0.03 optimistic). Validation at the time was 0.9230, making the distribution gap
+-0.060.
+
+## The encoder mismatch cost 0.026, not 0.002
+
+Submission 1 ran a matcher **trained with** encoder features **without** them, on the
+argument that ~93% of training pairs already carried `emb_cos=0, emb_present=0` so the
+remainder would look like the majority case. That argument was wrong.
+
+| Configuration | macro F_0.5 | India |
+|---|---|---|
+| Trained with encoder, run with it | 0.9249 | 0.9064 |
+| Trained with encoder, run without (submission 1) | 0.8935 | 0.8286 |
+| Trained without encoder, run without | **0.9196** | 0.8933 |
+
+`emb_present=1` was a learned routing signal on the non-Latin 7%: it told the model when
+string features were meaningless. Removing it at inference presents a combination never seen
+in training - a non-Latin target reporting zero encoder similarity - and the damage lands
+almost entirely on India, where the non-Latin names are. Retraining without the features
+costs 117 seconds and recovers +0.0261.
+
+## The candidate-set cut is no longer free
+
+An earlier measurement showed 18.6 -> 4.5 candidates per entity at zero score cost, and that
+was used to argue we could satisfy the organisers' candidate-size criterion for nothing.
+Re-measured against the GBM with expected-F_0.5 selection:
+
+| Candidate rule | cand/S1 | oracle | final F_0.5 |
+|---|---|---|---|
+| current (prefilter 0.34) | 18.54 | 0.9758 | **0.9197** |
+| top-8 | 6.92 | 0.9705 | 0.9076 |
+| rule >= 0.50 | 6.72 | 0.9607 | 0.9039 |
+| top-6 & rule >= 0.50 | 4.50 | 0.9562 | 0.8999 |
+
+The original measurement used the rule scorer with a fixed threshold, which never emitted
+those low-ranked candidates anyway. The learned matcher does use them, so cutting now costs
+0.012-0.020. The cut was dropped: a secondary ranking criterion is not worth that.
+
+## Global assignment
+
+One Source-2/3 record may belong to only one Source-1 entity. Submission 1 violated this on
+75,823 records - at least 179,786 provably-wrong links, 3.5% of output - detectable with no
+model at all.
+
+Selection is now global and iterated to a fixed point. Results on the full test set:
+
+| | submission 1 | submission 2 |
+|---|---|---|
+| links | 5,111,832 | 5,195,542 |
+| links/entity | 2.95 | 3.00 |
+| empty predictions | 7.4% | **5.5%** |
+| contested records | 75,823 | 4,411 |
+
+The empty rate landing on 5.5% against a true singleton rate of 5.58% is the clearest signal
+that the retrained matcher is properly calibrated; submission 1 was over-predicting empties
+by a third.
+
+**A single pass was not enough.** Re-selection promotes new candidates that collide with
+other entities' choices, leaving 4,411 records contested out of an initial 86,441. The code
+now iterates to a fixed point (verified adversarially: 60 entities competing over 40 records
+converge to zero), but the shipped files were produced before that fix. The residual is
+0.085% of links, worth roughly 0.0002, so they were not regenerated.
+
+This effect cannot be measured on the validation split at all: with 1-in-20 of Source 1,
+competing entities almost never co-occur - 8 contested records against 75,823 at full scale.
+
+## Where the remaining score is
+
+| | |
+|---|---|
+| Achieved (validation) | 0.9196 |
+| Oracle over current candidates | 0.9758 |
+| True links never blocked | 6.55% |
+| In candidates but not selected | 13.33% |
+| India / US | 0.8933 / 0.9374 |
+
+Blocking recall is the ceiling: the leader's 0.98 is above our oracle, so it is unreachable
+from this candidate set regardless of matcher quality. The measured union ceiling for
+name-4gram OR address-token is 99.98%, so the recall exists and is being lost in the 0.34
+prefilter and the df-capped keys.
