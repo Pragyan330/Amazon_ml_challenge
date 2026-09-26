@@ -1,5 +1,6 @@
 # ---- challenge data (2.5 GB, never commit) ----
 *.zip
+student_resource/data/ 
 student_resource/dataset/
 student_resource/.DS_Store
 __MACOSX/

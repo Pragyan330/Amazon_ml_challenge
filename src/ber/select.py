@@ -14,7 +14,9 @@ def select_threshold(scored, threshold, max_k=None):
     ``scored`` is a list of (score, id) sorted descending, as produced by the pipeline.
     """
     out = []
-    for score, tid in scored:
+    # Bug fix: don't assume `scored` is pre-sorted. Sorting explicitly prevents 
+    # early-break truncation when downstream models (like GBM) scramble the order.
+    for score, tid in sorted(scored, key=lambda x: x[0], reverse=True):
         if score < threshold:
             break
         out.append(tid)
