@@ -15,6 +15,7 @@ Two different IDF tables are deliberately in play:
   every feature.
 """
 
+from array import array
 import multiprocessing as mp
 import os
 import pickle
@@ -55,7 +56,12 @@ def _run_one(task):
     blocker = Blocker(df_name_b, df_addr_b, df_cap=df_cap, max_posting=max_posting)
 
     def feature_fn(r1, r2, score, cos, is_s3):
-        return pair_features(r1, r2, score, idf_name_f, idf_addr_f, default_f, cos, is_s3)
+        # array('f') rather than a list: a 35-element Python list of floats costs ~2.2 KB
+        # (35 pointers plus 35 boxed float objects plus list overhead) against ~204 bytes
+        # packed. Across eight workers holding ~750k rows each that is the difference
+        # between 13 GB and under 2 GB - the first configuration thrashed the machine.
+        return array("f", pair_features(r1, r2, score, idf_name_f, idf_addr_f, default_f,
+                                        cos, is_s3))
 
     # The rule score is itself a model feature - by a wide margin the most important one -
     # so it must be computed with the *training* IDF the model was fitted against. Only the
@@ -72,7 +78,7 @@ def _run_one(task):
     for slot, bucket in result.candidates.items():
         eid = result.s1_ids[slot]
         cand_out[eid] = [t for _, t, _ in bucket]
-        feats = [list(r) for _, _, r in bucket]
+        feats = [r for _, _, r in bucket]  # stay packed; array('f') supports extend
         add_rank_features(feats, [s for s, _, _ in bucket])
         start = len(rows)
         rows.extend(feats)
@@ -101,36 +107,63 @@ def _run_one(task):
 
 def run_submission(countries, s1_path, s23_paths, test_stats, train_stats_path,
                    matcher_path, out_dir, workers, chunks_per_country, prefilter, topk,
-                   df_cap, max_posting, emb_dir, emb_name, log=None):
+                   df_cap, max_posting, emb_dir, emb_name, log=None, resume=True,
+                   keep_parts=False):
+    """Run every (country, chunk) shard and merge the results.
+
+    Shards are independent and each writes its own file, so ``resume=True`` skips any whose
+    output already exists. A full run is ~55 minutes; without this, an interruption costs all
+    of it. Partial files are only deleted after a successful merge (unless ``keep_parts``),
+    so stopping mid-run is always safe.
+    """
     os.makedirs(out_dir, exist_ok=True)
+
+    def part_path(c, k):
+        return os.path.join(out_dir, f"sub_{c}_{k:03d}.pkl")
+
+    all_pairs = [(c, k) for c in countries for k in range(chunks_per_country)]
+    done = [(c, k) for c, k in all_pairs if resume and os.path.exists(part_path(c, k))]
+    todo = [(c, k) for c, k in all_pairs if (c, k) not in set(done)]
+    if log and done:
+        log(f"resuming: {len(done)} shard(s) already on disk, {len(todo)} to run")
+
     tasks = [(c, k, chunks_per_country, s1_path, s23_paths, test_stats, train_stats_path,
               matcher_path, prefilter, topk, df_cap, max_posting, emb_dir, emb_name,
               out_dir)
-             for c in countries for k in range(chunks_per_country)]
+             for c, k in todo]
     if log:
-        log(f"{len(tasks)} tasks ({len(countries)} countries x {chunks_per_country}) "
-            f"on {workers} workers")
+        log(f"{len(tasks)} task(s) on {workers} workers")
 
     stats = []
     t0 = time.time()
-    ctx = mp.get_context("spawn")
-    with ctx.Pool(processes=workers) as pool:
-        for i, st in enumerate(pool.imap_unordered(_run_one, tasks), 1):
-            stats.append(st)
-            if log:
-                log(f"  [{i}/{len(tasks)}] {st['country']} chunk {st['chunk']}: "
-                    f"{st['entities']:,} entities, {st['candidates_per_s1']:.1f} cand/S1, "
-                    f"{st['selected']:,} selected, {st['wall']:.0f}s")
-    if log:
-        log(f"all shards done in {time.time() - t0:.0f}s, merging ...")
+    if tasks:
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=workers) as pool:
+            for i, st in enumerate(pool.imap_unordered(_run_one, tasks), 1):
+                stats.append(st)
+                if log:
+                    log(f"  [{i}/{len(tasks)}] {st['country']} chunk {st['chunk']}: "
+                        f"{st['entities']:,} entities, {st['selected']:,} selected, "
+                        f"{st['wall']:.0f}s")
+        if log:
+            log(f"shards finished in {time.time() - t0:.0f}s, merging ...")
 
     sel, cand = {}, {}
-    for st in stats:
-        with open(st["path"], "rb") as fh:
-            s, c = pickle.load(fh)
+    merged = []
+    for c, k in all_pairs:
+        path = part_path(c, k)
+        if not os.path.exists(path):
+            if log:
+                log(f"WARNING: missing shard {c}/{k}; its entities will have empty rows")
+            continue
+        with open(path, "rb") as fh:
+            s, part_cand = pickle.load(fh)
         sel.update(s)
-        cand.update(c)
-        os.remove(st["path"])
+        cand.update(part_cand)
+        merged.append(path)
+    if not keep_parts:
+        for path in merged:
+            os.remove(path)
     if log:
-        log(f"merged {len(cand):,} entities")
+        log(f"merged {len(merged)} shard(s), {len(cand):,} entities")
     return sel, cand, stats

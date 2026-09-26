@@ -50,6 +50,10 @@ def main():
     ap.add_argument("--topk", type=int, default=40)
     ap.add_argument("--df-cap", type=int, default=60)
     ap.add_argument("--max-posting", type=int, default=200)
+    ap.add_argument("--no-resume", action="store_true",
+                    help="recompute shards even if their part file already exists")
+    ap.add_argument("--keep-parts", action="store_true",
+                    help="do not delete shard part files after merging")
     ap.add_argument("--s1-limit", type=int, default=0,
                     help="smoke test: only the first N Source-1 entities")
     args = ap.parse_args()
@@ -96,7 +100,7 @@ def main():
         prefilter=args.prefilter, topk=args.topk, df_cap=args.df_cap,
         max_posting=args.max_posting,
         emb_dir=EMBEDDINGS if args.embeddings else None, emb_name=args.embeddings,
-        log=log)
+        log=log, resume=not args.no_resume, keep_parts=args.keep_parts)
 
     order = []
     with open(s1, encoding="utf-8") as fh:
