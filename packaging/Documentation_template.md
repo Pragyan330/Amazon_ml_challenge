@@ -1,8 +1,8 @@
 # ML Challenge 2026: Business Entity Resolution Solution
 
-**Team Name:** [FILL IN]
-**Team Members:** [FILL IN]
-**Submission Date:** [FILL IN]
+**Team Name:** <<< REPLACE WITH TEAM NAME >>>
+**Team Members:** <<< REPLACE WITH MEMBER NAMES >>>
+**Submission Date:** <<< REPLACE WITH DATE >>>
 
 ---
 

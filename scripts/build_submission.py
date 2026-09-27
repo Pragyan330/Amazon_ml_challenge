@@ -83,7 +83,10 @@ def main():
     shutil.copy2(matching, os.path.join(STAGE, "output", "matching_results.tsv"))
     shutil.copy2(candidate, os.path.join(STAGE, "output", "candidate_pairs.tsv"))
 
-    ignore = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pkl", ".ipynb_checkpoints")
+    # predict.py is superseded by submit.py and would produce a different, worse result if
+    # a reviewer ran it. Excluded so the package has exactly one entry point per stage.
+    ignore = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pkl", ".ipynb_checkpoints",
+                                    "predict.py")
     shutil.copytree(os.path.join(REPO, "src", "ber"),
                     os.path.join(code_root, "src", "ber"), ignore=ignore)
     shutil.copytree(os.path.join(REPO, "scripts"),
