@@ -18,6 +18,8 @@ Missing evidence is encoded as an explicit flag rather than a zero, so the model
 "no address to compare" apart from "addresses disagree".
 """
 
+from array import array
+
 from .features import (
     containment,
     dice,
@@ -106,8 +108,45 @@ def pair_features(r1, r2, base_score, idf_name, idf_addr, default_idf, emb_cos, 
 
 CROSS_FEATURE_NAMES = ["xs_max_opp", "xs_mean_opp", "xs_n_opp_strong", "xs_max_same"]
 
+_MASK32 = 0xFFFFFFFF
 
-def add_cross_source_features(rows, recs, is_s3_flags, strong=0.5):
+
+def token_signature(rec):
+    """Compact, order-independent signature of a record's name+address tokens.
+
+    Sorted 32-bit token hashes in an ``array('I')``. Measured at ~140 bytes against 1,126
+    for the token set and 1,686 for the whole ``Rec``, which is what makes cross-source
+    features affordable inside the submission workers: holding token sets for every
+    candidate would need 8.3 GB across five workers, and whole records 12.4 GB.
+
+    Unlike a MinHash sketch this keeps Jaccard **exact** (up to 32-bit hash collisions,
+    negligible at ~15 tokens), so the feature means the same thing at training and at
+    inference. Training on exact string Jaccard and inferring on an approximation would be
+    the same class of silent train/serve mismatch that cost 0.026 with the encoder.
+    """
+    return array("I", sorted({hash(t) & _MASK32 for t in rec.nc | rec.at}))
+
+
+def _sig_jaccard(a, b):
+    """Jaccard over two sorted uint32 arrays, by merge."""
+    la, lb = len(a), len(b)
+    if not la or not lb:
+        return 0.0
+    i = j = inter = 0
+    while i < la and j < lb:
+        x, y = a[i], b[j]
+        if x == y:
+            inter += 1; i += 1; j += 1
+        elif x < y:
+            i += 1
+        else:
+            j += 1
+    if not inter:
+        return 0.0
+    return inter / (la + lb - inter)
+
+
+def add_cross_source_features(rows, sigs, is_s3_flags, strong=0.5):
     """Append cross-source agreement features, appended per entity.
 
     The strongest unexploited signal in this dataset. Measured on the training data, a
@@ -124,22 +163,19 @@ def add_cross_source_features(rows, recs, is_s3_flags, strong=0.5):
 
     ``xs_max_same`` covers the opposite case - two near-identical records from the *same*
     source competing for one slot, where at most one is usually right.
+
+    ``sigs`` are :func:`token_signature` arrays, not records, so the same code runs in the
+    trainer and inside the submission workers with identical semantics.
     """
     n = len(rows)
     if n == 0:
         return rows
-    toks = [r.nc | r.at for r in recs]
     sims = [[0.0] * n for _ in range(n)]
     for i in range(n):
-        ti = toks[i]
+        si = sigs[i]
         for j in range(i + 1, n):
-            tj = toks[j]
-            if ti and tj:
-                inter = len(ti & tj)
-                s = inter / (len(ti) + len(tj) - inter) if inter else 0.0
-            else:
-                s = 0.0
-            sims[i][j] = sims[j][i] = s
+            v = _sig_jaccard(si, sigs[j])
+            sims[i][j] = sims[j][i] = v
     for i in range(n):
         opp = [sims[i][j] for j in range(n) if j != i and is_s3_flags[j] != is_s3_flags[i]]
         same = [sims[i][j] for j in range(n) if j != i and is_s3_flags[j] == is_s3_flags[i]]

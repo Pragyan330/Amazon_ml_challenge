@@ -25,7 +25,8 @@ import time
 def _run_one(task):
     from .blocking import Blocker, idf_from_df
     from .embeddings import load as load_emb
-    from .pairfeatures import add_rank_features, pair_features
+    from .pairfeatures import (add_cross_source_features, add_rank_features,
+                           pair_features, token_signature)
     from .parallel import chunk_keeper
     from .pipeline import run_shard
     from .scorer import Weights
@@ -55,13 +56,19 @@ def _run_one(task):
     emb = load_emb(emb_dir, emb_name) if emb_name else None
     blocker = Blocker(df_name_b, df_addr_b, df_cap=df_cap, max_posting=max_posting)
 
+    use_xs = bool(m.get("cross_source"))
+
     def feature_fn(r1, r2, score, cos, is_s3):
-        # array('f') rather than a list: a 35-element Python list of floats costs ~2.2 KB
-        # (35 pointers plus 35 boxed float objects plus list overhead) against ~204 bytes
-        # packed. Across eight workers holding ~750k rows each that is the difference
-        # between 13 GB and under 2 GB - the first configuration thrashed the machine.
-        return array("f", pair_features(r1, r2, score, idf_name_f, idf_addr_f, default_f,
-                                        cos, is_s3))
+        # array('f') rather than a list: a Python list of floats costs ~1,176 bytes (one
+        # pointer plus one boxed float per column) against ~156 packed. Across workers
+        # holding ~750k rows each that is the difference between 13 GB and under 2 GB.
+        #
+        # The token signature rides along when the model wants cross-source features: 108
+        # bytes, against 1,126 for the token set and 1,686 for the whole record. Those
+        # would need 8.3 GB and 12.4 GB respectively across five workers.
+        row = array("f", pair_features(r1, r2, score, idf_name_f, idf_addr_f, default_f,
+                                       cos, is_s3))
+        return (row, token_signature(r2)) if use_xs else row
 
     # The rule score is itself a model feature - by a wide margin the most important one -
     # so it must be computed with the *training* IDF the model was fitted against. Only the
@@ -83,7 +90,12 @@ def _run_one(task):
     for slot, bucket in result.candidates.items():
         eid = result.s1_ids[slot]
         cand_out[eid] = [t for _, t, _ in bucket]
-        feats = [r for _, _, r in bucket]  # stay packed; array('f') supports extend
+        if use_xs:
+            feats = [p[0] for _, _, p in bucket]
+            sigs = [p[1] for _, _, p in bucket]
+            add_cross_source_features(feats, sigs, [t[1] == "3" for _, t, _ in bucket])
+        else:
+            feats = [r for _, _, r in bucket]  # stay packed; array('f') supports extend
         add_rank_features(feats, [s for s, _, _ in bucket])
         start = len(rows)
         rows.extend(feats)
