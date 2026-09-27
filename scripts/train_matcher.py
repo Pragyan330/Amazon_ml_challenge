@@ -33,7 +33,8 @@ from ber.blocking import idf_from_df
 from ber.config import ARTIFACTS, EMBEDDINGS, TRAIN
 from ber.dataio import read_source
 from ber.evaluate import breakdown, macro_f_beta
-from ber.pairfeatures import FEATURE_NAMES, add_rank_features, pair_features
+from ber.pairfeatures import (FEATURE_NAMES, add_cross_source_features,
+                              add_rank_features, pair_features)
 from ber.record import build
 from ber.select import select_threshold
 from ber.setselect import expected_f05_ratio_approx, select_expected_f05
@@ -48,6 +49,9 @@ def main():
     ap.add_argument("--scored", default="val_scored_emb.pkl")
     ap.add_argument("--embeddings", default="train_s1every20_names")
     ap.add_argument("--rounds", type=int, default=1500)
+    ap.add_argument("--cross-source", action="store_true",
+                    help="add cross-source corroboration features")
+    ap.add_argument("--out-model", default="matcher.pkl")
     ap.add_argument("--leaves", type=int, default=63)
     ap.add_argument("--lr", type=float, default=0.05)
     args = ap.parse_args()
@@ -113,18 +117,23 @@ def main():
         if r1 is None:
             continue
         split = "train" if eid in train_e else ("calib" if eid in calib_e else "test")
-        rows, bases, tids = [], [], []
+        rows, bases, tids, recs, flags = [], [], [], [], []
         for base, tid in cands:
             r2 = t_rec.get(tid)
             if r2 is None:
                 continue
             cos = emb.similarity(eid, tid) if emb is not None else None
+            is_s3 = tid.startswith("S3-")
             rows.append(pair_features(r1, r2, base, idf_name, idf_addr, default_idf,
-                                      cos, tid.startswith("S3-")))
+                                      cos, is_s3))
             bases.append(base)
             tids.append(tid)
+            recs.append(r2)
+            flags.append(is_s3)
         if not rows:
             continue
+        if args.cross_source:
+            add_cross_source_features(rows, recs, flags)
         add_rank_features(rows, bases)
         ts = truth[eid]
         X[split].extend(rows)
@@ -143,7 +152,9 @@ def main():
               "min_data_in_leaf": 100, "feature_fraction": 0.9,
               "bagging_fraction": 0.8, "bagging_freq": 1,
               "verbose": -1, "num_threads": os.cpu_count(), "seed": 42}
-    dtrain = lgb.Dataset(X["train"], label=y["train"], feature_name=FEATURE_NAMES)
+    names = FEATURE_NAMES if args.cross_source else [
+        n for n in FEATURE_NAMES if not n.startswith("xs_")]
+    dtrain = lgb.Dataset(X["train"], label=y["train"], feature_name=names)
     dcalib = lgb.Dataset(X["calib"], label=y["calib"], reference=dtrain)
     t0 = time.time()
     gbm = lgb.train(params, dtrain, num_boost_round=args.rounds,
@@ -153,7 +164,7 @@ def main():
     log(f"trained {gbm.best_iteration} rounds in {time.time() - t0:.0f}s "
         f"(calib auc {gbm.best_score['calib']['auc']:.5f})")
 
-    imp = sorted(zip(FEATURE_NAMES, gbm.feature_importance("gain")),
+    imp = sorted(zip(names, gbm.feature_importance("gain")),
                  key=lambda x: -x[1])
     log("top features by gain:")
     for nm, g in imp[:14]:
@@ -242,10 +253,10 @@ def main():
     orc = {e: set(t for _, t in scored.get(e, [])) & test_truth[e] for e in test_truth}
     log(f"  oracle over candidates   : {macro_f_beta(orc, test_truth):.4f}")
 
-    out = os.path.join(ARTIFACTS, "matcher.pkl")
+    out = os.path.join(ARTIFACTS, args.out_model)
     with open(out, "wb") as fh:
         pickle.dump({"model": gbm.model_to_string(), "iso_x": iso.X_thresholds_,
-                     "iso_y": iso.y_thresholds_, "features": FEATURE_NAMES,
+                     "iso_y": iso.y_thresholds_, "features": names,
                      "best_iteration": gbm.best_iteration}, fh)
     log(f"saved model to {out}")
 
