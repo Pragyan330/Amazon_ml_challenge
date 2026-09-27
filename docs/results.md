@@ -440,3 +440,51 @@ Blocking recall is the ceiling: the leader's 0.98 is above our oracle, so it is 
 from this candidate set regardless of matcher quality. The measured union ceiling for
 name-4gram OR address-token is 99.98%, so the recall exists and is being lost in the 0.34
 prefilter and the df-capped keys.
+
+---
+
+# Submission 3 - v2 model
+
+Validation macro F_0.5 **0.9288** on an 88,331-entity test split (previous splits were
+22,110, so this figure is also considerably firmer). Leaderboard for submission 2 pending.
+
+| Stage | macro F_0.5 |
+|---|---|
+| Submission 1 configuration (encoder mismatch) | 0.8935 |
+| Retrained without encoder | 0.9196 |
+| + cross-source corroboration | 0.9266 |
+| + 4x training data, tuned | **0.9288** |
+
+India 0.9001, US 0.9479. Micro precision/recall 0.9775 / 0.8658. Early-stopped at 2,983
+rounds, calib AUC 0.99843.
+
+The 4x data (441,655 entities against 110,550) was worth only +0.0022. The model is
+saturating; further gains have to come from blocking, not from the matcher.
+
+## Output
+
+| | submission 2 | submission 3 |
+|---|---|---|
+| links | 5,195,542 | 5,613,117 |
+| links/entity | 3.00 | 3.24 |
+| empty predictions | 5.5% | 4.9% |
+| contested records | 4,411 | **0** |
+
+Contention now iterates to a true fixed point: 59,328 initially contested resolved over five
+passes to zero, removing 111,927 links. The single-pass version left 4,411 because
+re-selection promotes candidates that collide with other entities.
+
+Note the empty rate moved from 5.5% to 4.9% against a true singleton rate of 5.58%. The
+previous run was closer on that axis; the current model predicts slightly more aggressively.
+
+## Machine crash during training
+
+The first attempt at the 4x model crashed the machine outright. MemoryError at ~21.6 GB
+against 23 GB, from two causes: 3.88M target Rec objects held simultaneously (9.7 GB) and 8M
+feature rows accumulated as Python lists (9.5 GB). The second was the boxed-float problem
+already identified and fixed in the submission worker, never carried across to the trainer.
+
+Training is now bounded by construction - preallocated float32 arrays sized by a counting
+pass, and both record sides built in groups so neither is held whole - with a projected peak
+of 4.5 GB against an observed floor of 11 GB free. Both long-running jobs also carry a
+watchdog that aborts them below 1.2 GB free.

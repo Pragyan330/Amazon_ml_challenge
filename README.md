@@ -18,7 +18,8 @@ Built in stages, simplest first, measuring at each step.
 | 1b. Stripped pipeline + Jaccard family + channel confidence | done | 0.7981 |
 | 1c. Multilingual encoder (LaBSE) for the transliterated tail | done | **0.7998** |
 | 2. Gradient-boosted matcher (LightGBM, 35 features) | done | 0.8727 |
-| 3. Expected-F_0.5 set selection (exact) | done | **0.9249** |
+| 3. Expected-F_0.5 set selection (exact) | done | 0.9249 |
+| 4. Cross-source corroboration + 4x data + global assignment | done | **0.9288** |
 | 4. Raise candidate recall (6.57% of links never blocked) | **next** — oracle 0.9758 now caps us | — |
 
 

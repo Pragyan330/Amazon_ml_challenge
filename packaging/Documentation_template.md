@@ -204,8 +204,8 @@ approximate one, precisely at the singleton decision where an error costs a full
 
 ## 5. Results & Error Analysis
 
-**F_0.5 Score (macro):** **0.9196** on 22,110 held-out entities (0.9249 with the optional
-encoder enabled). Public leaderboard: 0.863 for an earlier configuration; see below. Splits are entity-disjoint
+**F_0.5 Score (macro):** **0.9288** on 88,331 held-out entities. Public leaderboard: 0.863
+for an earlier configuration that shipped a train/inference feature mismatch; see below. Splits are entity-disjoint
 (train / calibration / test) and only the test split is reported.
 
 | Configuration | macro F_0.5 |
@@ -213,8 +213,9 @@ encoder enabled). Public leaderboard: 0.863 for an earlier configuration; see be
 | All-empty submission | 0.0558 |
 | Rule scorer, best fixed threshold | 0.7994 |
 | LightGBM, best fixed threshold | 0.8727 |
-| **LightGBM + expected-F_0.5 selection** | **0.9196** |
-| ... with the optional multilingual encoder | 0.9249 |
+| LightGBM + expected-F_0.5, no cross-source | 0.9196 |
+| + cross-source corroboration features | 0.9266 |
+| **+ 4x training data** | **0.9288** |
 | Oracle over the same candidate set | 0.9758 |
 
 Micro precision/recall 0.9767 / 0.8510. Singletons correctly left empty: 83.97%, up from
